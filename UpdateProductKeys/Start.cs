@@ -19,6 +19,9 @@ namespace UpdateProductKeys
             //process rows xcel method have to pass datbase object so that can do database method calls from xcel
             dbAccess.GetDataSet(xcel.rowList);
             dbAccess.CloseConn();
+            xcel.ProcessRows(dbAccess); //passing dbaccess so method can access license and inventory datatables
+            Debug.WriteLine("about to update sheer");
+            xcel.UpdateWSheet();    //update spreadsheet from datatable
             xcel.Dispose();
         }
     }

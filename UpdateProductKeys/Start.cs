@@ -21,7 +21,10 @@ namespace UpdateProductKeys
             dbAccess.CloseConn();
             xcel.ProcessRows(dbAccess); //passing dbaccess so method can access license and inventory datatables
             Debug.WriteLine("about to update sheer");
-            xcel.UpdateWSheet();    //update spreadsheet from datatable
+            //xcel.UpdateWSheet();    //update spreadsheet from datatable each row updated as it is processed
+            xcel.userMessageCell.Value2 = "Updating License database from local copy";
+            dbAccess.UpdateSysLicTable();
+            xcel.RemoveUserMess();
             xcel.Dispose();
         }
     }

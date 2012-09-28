@@ -6,6 +6,7 @@ using Excel = Microsoft.Office.Interop.Excel;
 using System.Diagnostics;
 using System.Windows.Forms;
 using System.Data;
+using System.IO.MemoryMappedFiles;
 
 namespace UpdateProductKeys
 {
@@ -70,9 +71,6 @@ namespace UpdateProductKeys
             }
             //pull spreadsheet data across for faster performance
             xlRangeWorking = xlWsheet.UsedRange;
-            object test = new object();
-            test = xlWsheet.Range["B11"].Value2;
-            Console.WriteLine(test.ToString());
             object[,] sysObj = new object[5, xlRangeWorking.Rows.Count];
             sysObj = xlRangeWorking.Value2;
             rowList = (from idx1 in Enumerable.Range(1, sysObj.GetLength(0))
@@ -91,38 +89,39 @@ namespace UpdateProductKeys
 
         internal void ProcessRows(MySql dbAccess)
         {
-            
-            userMessageCell.Value2 = "Updating Data";
+            userMessageCell.Value2 = "Updating local copy of license database entries";
             foreach (var row in rowList)
             {
                 var qry = from DataRow record in dbAccess.systemlicEx.Rows
-                          where (string)record["mr_serial_number"] == row.mSerNo  && (string)record["mr_manufacturer"] == row.mMfr
-                          select record;
-                Console.WriteLine("count = " + qry.Count().ToString() + "   entry= ");
+                          where ((record["mr_serial_number"] != DBNull.Value) ? (string)record["mr_serial_number"] : "") == row.mSerNo && ((record["mr_manufacturer"] != DBNull.Value) ? (string)record["mr_manufacturer"] : "") == row.mMfr
+                          select new { rec = record, indx = dbAccess.systemlicEx.Rows.IndexOf(record) };
                 switch (qry.Count())
                 {
                     case 0:
-                        row.mStatus = "No Entry in License Database";
+                        row.mRsult = "No Entry in License Database";
+                        UpdateWSheetRow(rowList.IndexOf(row));
                         InvDbAnalysis();
                         continue;
                     case 1:
                         break;
                     default:
-                        row.mStatus = "Multiple Entries in License Database - major DB error";
+                        row.mRsult = "Multiple Entries in License Database - major DB error";
+                        UpdateWSheetRow(rowList.IndexOf(row));
                         continue;
                 }
-                DataTable dbResult = qry.CopyToDataTable();
-                DataRowCollection dbResultRows = dbResult.Rows;
-                Func<bool> notValid0000000 = () => ((sbyte)dbResultRows[0]["valid"] & 1) == 0;
-                Func<bool> forceKeyUpload0 = () => ((sbyte)dbResultRows[0]["valid"] & 4) == 4;
-                Func<bool> forcKeyUplodOEM = () => ((string)dbResultRows[0]["product_code"]) == "OEM:SLP";
-                Func<bool> keyfordownload0 = () => ((sbyte)dbResultRows[0]["valid"] & 2) == 2;
-                Func<bool> nlkfordownload0 = () => ((string)dbResultRows[0]["product_code"]) == "NLK";
-                Action statusNotValid0000 = () => row.mStatus = "Flagged \"Not Valid\" in License Database";
-                Action statusKeyUpload000 = () => row.mStatus = "Upload Product Key - VLK(Techsoup??)";
-                Action statusKeyUploadOEM = () => row.mStatus = "Upload OEM COA Product Key";
-                Action statKeyForDownload = () => row.mStatus = "Non-NLK Key available for download";
-                Action statNLKForDownload = () => row.mStatus = "NLK available for download";
+                //at this point have only 1 record which is correct and desirable
+                DataRow rowlicTable = qry.ElementAtOrDefault(0).rec;    //row in license table to be processed
+                int licTableRow = qry.ElementAtOrDefault(0).indx;   //index of that row - needed for later updating of the database after row processing
+                Func<bool> notValid0000000 = () => ((sbyte)rowlicTable["valid"] & 1) == 0;
+                Func<bool> forceKeyUpload0 = () => ((sbyte)rowlicTable["valid"] & 4) == 4;
+                Func<bool> forcKeyUplodOEM = () => ((string)rowlicTable["product_code"]) == "OEM:SLP";
+                Func<bool> keyfordownload0 = () => ((sbyte)rowlicTable["valid"] & 2) == 2;
+                Func<bool> nlkfordownload0 = () => ((string)rowlicTable["product_code"]) == "NLK";
+                Action statusNotValid0000 = () => row.mRsult = "Flagged \"Not Valid\" in License Database";
+                Action statusKeyUpload000 = () => ProcessNewKey(row, "Upload Product Key - VLK(Techsoup??)", rowlicTable);
+                Action statusKeyUploadOEM = () => ProcessNewKey(row, "Upload OEM COA Product Key", rowlicTable);
+                Action statKeyForDownload = () => { string l5 = GetExistKeyLast5(rowlicTable); ProcessNewKey(row, "Product Key Ending " + l5 + " available for download", rowlicTable); };
+                Action statNLKForDownload = () => ProcessNewKey(row, "NLK available for download", rowlicTable);
                 LogicTable.Start()
                     .Condition(notValid0000000, "T----")
                     .Condition(forceKeyUpload0, "FTTFF")
@@ -134,9 +133,68 @@ namespace UpdateProductKeys
                     .Action(statusKeyUpload000, " X   ")
                     .Action(statKeyForDownload, "   X ")
                     .Action(statNLKForDownload, "    X");
+                dbAccess.systemlicEx.Rows[licTableRow]["valid"] = rowlicTable["valid"];
+                dbAccess.systemlicEx.Rows[licTableRow]["product_code"] = rowlicTable["product_code"];
+                UpdateWSheetRow(rowList.IndexOf(row));
             }
+        }
 
-            
+        private string GetExistKeyLast5(DataRow rowDataBase)
+        {
+            string decKey = EncodeDecodeKey((string)rowDataBase["product_code"], "-d");
+            return decKey.Substring(24);
+        }
+
+        private void ProcessNewKey(RowData row, string mstatusMess, DataRow rowDataBase)
+        {
+            //check key with pid chaecker here to be added after reg exp check
+            row.mStatus = mstatusMess;
+            System.Text.RegularExpressions.Regex keyPattern = new System.Text.RegularExpressions.Regex("^([BCDFGHJKMPQRTVWXY2346789]{5}-){4}[BCDFGHJKMPQRTVWXY2346789]{5}$");
+            System.Text.RegularExpressions.Regex keyPattern1 = new System.Text.RegularExpressions.Regex("^[BCDFGHJKMPQRTVWXY2346789]{25}$");
+            if (row.mOsPK == null || !(keyPattern.IsMatch(row.mOsPK) || keyPattern1.IsMatch(row.mOsPK)))
+            {
+                row.mRsult = "Specified Product Key has incorrect form or alphanumeric characters";
+                return;
+            }
+            string encKey = EncodeDecodeKey(row.mOsPK, "-e");  //Encrypt the key
+            rowDataBase["product_code"] = encKey;
+            rowDataBase["valid"] = ((sbyte)rowDataBase["valid"] & 249) + 2; //resets the 4 bit and sets the 2 bit
+            row.mRsult = "Product Key Updated ";
+            //Console.ReadKey();
+        }
+
+        private static string EncodeDecodeKey(string str, string param)
+        {//Calls KeyCrypt with either -e or -d as a parameter and gets a string back and forth
+            string encDecKey;
+            using (MemoryMappedFile mmf = MemoryMappedFile.CreateNew("EncDecString", 80))
+            {
+                System.Threading.Mutex mutex = new System.Threading.Mutex(true, "EncMemShare");
+                using (MemoryMappedViewStream stream = mmf.CreateViewStream())
+                {
+                    System.IO.StreamWriter wtr = new System.IO.StreamWriter(stream);
+                    wtr.Write(str);
+                    wtr.Flush();
+                }
+                mutex.ReleaseMutex();
+                string codeBase = System.Reflection.Assembly.GetExecutingAssembly().CodeBase;
+                UriBuilder uri = new UriBuilder(codeBase);
+                string path = Uri.UnescapeDataString(uri.Path);
+                path = System.IO.Path.GetDirectoryName(path);   //now path is path to current executing assembly which is where KeyCrypt will be on install
+                string keyCryptPath = System.IO.Path.Combine(path, "KeyCrypt.exe");
+                Process p = Process.Start(keyCryptPath, param);
+                p.WaitForExit();
+                mutex.WaitOne();    //this process now waits until gets mutex back which means encryption is done
+                //Console.ReadKey();  //wait to do pkencrypt
+                using (MemoryMappedViewStream stream = mmf.CreateViewStream())
+                {
+                    System.IO.StreamReader rdr = new System.IO.StreamReader(stream);
+                    encDecKey = rdr.ReadToEnd();
+                    encDecKey = encDecKey.Substring(0, encDecKey.IndexOf("\0"));
+                }
+                mutex.ReleaseMutex();
+                mutex.Dispose();
+            }
+            return encDecKey;
         }
 
         private void InvDbAnalysis()
@@ -158,11 +216,18 @@ namespace UpdateProductKeys
             userMessageCell.Font.Italic = false;
             userMessageCell.Value2 = "Current Status";
         }
+        void UpdateWSheetRow(int rowNo)
+        {
+            object[] objData = new object[5];
+            Excel.Range rowRng = xlWsheet.Range[xlRangeWorking.Cells[rowNo + 2, 1], xlRangeWorking.Cells[rowNo + 2, 5]];
+            objData[0] = rowList[rowNo].mMfr; objData[1] = rowList[rowNo].mSerNo; objData[2] = rowList[rowNo].mOsPK; objData[3] = rowList[rowNo].mStatus; objData[4] = rowList[rowNo].mRsult;
+            rowRng.Value2 = objData;
+        }
         private void DisposeX()
         {
             if (xlApp.ActiveWorkbook != null)
             {
-                this.xlApp.ActiveWorkbook.Close(); 
+                this.xlApp.ActiveWorkbook.Close();
             }
             xlApp = null;
             Environment.Exit(1);
@@ -171,9 +236,16 @@ namespace UpdateProductKeys
         {
             if (xlApp.ActiveWorkbook != null)
             {
-                this.xlApp.ActiveWorkbook.Close(); 
+                this.xlApp.ActiveWorkbook.Close();
             }
             xlApp = null;
+        }
+
+        internal void RemoveUserMess()
+        {
+            userMessageCell.Font.Color = userMessageCell.Offset[0, 1].Font.Color;
+            userMessageCell.Font.Italic = false;
+            userMessageCell.Value2 = "Current Status";
         }
     }
 }

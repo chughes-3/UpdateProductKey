@@ -10,11 +10,12 @@ namespace UpdateProductKeys
     class MySql
     {
         MySqlConnection dbConn;
+        MySqlDataAdapter dbDataAdptr; 
         internal DataTable invLicCombined = new DataTable();
         internal DataTable systemlicEx;
         internal MySql()
         {
-            Console.WriteLine("statring sql");
+            Console.WriteLine("starting sql");
             Console.WriteLine(System.Configuration.ConfigurationManager.ConnectionStrings["PracticeDB"].ToString());
             string dbConnString = System.Configuration.ConfigurationManager.ConnectionStrings["PracticeDB"].ToString();
             dbConn = new MySqlConnection(dbConnString);
@@ -57,7 +58,7 @@ namespace UpdateProductKeys
                 selectCmd.Parameters.AddWithValue(paramNames[i], xcelRowList[i].mMfr + xcelRowList[i].mSerNo);
             }
             selectCmd.Connection = dbConn;
-            MySqlDataAdapter dbDataAdptr = new MySqlDataAdapter(selectCmd);
+            dbDataAdptr = new MySqlDataAdapter(selectCmd);
             dbDataAdptr.SelectCommand.CommandType = System.Data.CommandType.Text;
             try
             {
@@ -76,19 +77,21 @@ namespace UpdateProductKeys
             systemlicEx.AcceptChanges();
             //At this point systemlicEX has records from systemlic table and the invLicCombined has records for all inventory table entries. The extra columns can be ignored since the dataAdpater update sql statement will be hand crafted to use just the columns of interest. It was really unnecessary to remove the extra columns from systemlicEX - it was done for easy reading in console window.
             OutTable2Console(systemlicEx);
-            //systemlicEx.Rows[3]["valid"] = 3;
-            //OutTable2Console(systemlicEx);
+
+        }
+
+        internal void UpdateSysLicTable()
+        {
             string mySqlCmd = "UPDATE `systemlic` " +
                 "SET `valid` = @valid, `product_code` = @product_code " +
                 "WHERE (`lic_db_id` = @lic_db_id)";
-
             MySqlCommand cmd = new MySqlCommand(mySqlCmd, dbConn);
             cmd.Parameters.Add("@valid", MySqlDbType.Byte, 1, "valid");   //valid is tinyint = signed byte
             cmd.Parameters.Add("@product_code", MySqlDbType.VarChar, 80, "product_code");
             cmd.Parameters.Add("@lic_db_id", MySqlDbType.UInt32, 15, "lic_db_id");  // size is ignored for int32
-            //dbDataAdptr.UpdateCommand = cmd;
-            //var output = dbDataAdptr.Update(systemlicEx);
-            //Console.WriteLine("output = " + output);
+            dbDataAdptr.UpdateCommand = cmd;
+            var output = dbDataAdptr.Update(systemlicEx);
+            Console.WriteLine("Rows Updated = " + output);
         }
 
         internal void getUpLicDataset()

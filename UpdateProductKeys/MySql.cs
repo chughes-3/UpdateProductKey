@@ -10,14 +10,17 @@ namespace UpdateProductKeys
     class MySql
     {
         MySqlConnection dbConn;
-        MySqlDataAdapter dbDataAdptr; 
+        MySqlDataAdapter dbDataAdptr;
         internal DataTable invLicCombined = new DataTable();
         internal DataTable systemlicEx;
-        internal MySql()
+        internal MySql(string production)
         {
-            Console.WriteLine("starting sql");
-            Console.WriteLine(System.Configuration.ConfigurationManager.ConnectionStrings["PracticeDB"].ToString());
-            string dbConnString = System.Configuration.ConfigurationManager.ConnectionStrings["PracticeDB"].ToString();
+            Console.WriteLine("Starting sql");
+            string dbConnString;
+            if (production != "-p")
+                dbConnString = System.Configuration.ConfigurationManager.ConnectionStrings["PracticeDB"].ToString();
+            else
+                dbConnString = System.Configuration.ConfigurationManager.ConnectionStrings["ProductionDB"].ToString();
             dbConn = new MySqlConnection(dbConnString);
             //dbConn.Open();
             //string stm = "SELECT VERSION()";
@@ -35,13 +38,13 @@ namespace UpdateProductKeys
         {
             // See notes in OneNote for full explanation of below or google on sql parameter IN clause
             string cmdText =
-                "SELECT `inv_db_id`, a.lic_db_id, `inv_flags`, a.mr_manufacturer, a.mr_serial_number, `os_product_key_type`, `os_product_key`, `valid`, `product_code` " +
+                "SELECT `inv_db_id`, a.lic_db_id, `active`, `inv_flags`, a.mr_manufacturer, a.mr_serial_number, `os_product_key_type`, `os_partial_product_key`, `os_product_key`, `valid`, `product_code` " +
                 "FROM inventory2012 AS a " +
                 "LEFT JOIN systemlic AS b ON a.mr_manufacturer = b.mr_manufacturer  AND a.mr_serial_number = b.mr_serial_number " +
                 " WHERE CONCAT( a.mr_manufacturer, a.mr_serial_number )" +
                 " IN ({0})" +
                 " UNION " +
-                " SELECT`inv_db_id` , b.lic_db_id,`inv_flags` , b.mr_manufacturer, b.mr_serial_number, `os_product_key_type`, `os_product_key`, `valid`, `product_code` " +
+                "SELECT `inv_db_id`, b.lic_db_id, `active`, `inv_flags`, b.mr_manufacturer, b.mr_serial_number, `os_product_key_type`, `os_partial_product_key`,  `os_product_key`, `valid`, `product_code` " +
                 "FROM inventory2012 AS a " +
                 "RIGHT JOIN systemlic AS b ON a.mr_manufacturer = b.mr_manufacturer AND a.mr_serial_number = b.mr_serial_number " +
                 "WHERE CONCAT( b.mr_manufacturer, b.mr_serial_number ) " +
@@ -68,20 +71,30 @@ namespace UpdateProductKeys
             {
                 Console.WriteLine("Error: {0}", ex.ToString());
             }
-            var qry = from DataRow row in invLicCombined.Rows where ((int)row[1] != 0) select row; //row[7] != DBNull.Value ||  this is the license valid column if it is DBNull then no entry was in the license table for this system. Also if lic_db_id in inventory table = 0 then this is not a valid license db record.
-            systemlicEx = qry.CopyToDataTable();  //define the LINQ qry then qry.copytotable is syntax for creating datatable from linq per msdn
-            systemlicEx.Columns.RemoveAt(6);    //removes os_product_key from inventory table
-            systemlicEx.Columns.RemoveAt(5);    //remove os_product_key_type
-            systemlicEx.Columns.RemoveAt(2);//remove inv_flags
-            systemlicEx.Columns.RemoveAt(0);    //remove inv_db_id
-            systemlicEx.AcceptChanges();
-            //At this point systemlicEX has records from systemlic table and the invLicCombined has records for all inventory table entries. The extra columns can be ignored since the dataAdpater update sql statement will be hand crafted to use just the columns of interest. It was really unnecessary to remove the extra columns from systemlicEX - it was done for easy reading in console window.
-            OutTable2Console(systemlicEx);
+            var qry = from DataRow row in invLicCombined.Rows where ((int)row["lic_db_id"] != 0 && row["valid"] != DBNull.Value) select row; //||  this is the license valid column if it is DBNull then no entry was in the license table for this system. Also if lic_db_id in inventory table = 0 then this is not a valid license db record.
+            if (qry.Count() > 0)
+            {
+                systemlicEx = qry.CopyToDataTable();  //define the LINQ qry then qry.copytotable is syntax for creating datatable from linq per msdn
+                systemlicEx.Columns.Remove("inv_db_id");    //remove inv_db_id
+                systemlicEx.Columns.Remove("active");   //remove active flags
+                systemlicEx.Columns.Remove("inv_flags"); //remove inv_flags
+                systemlicEx.Columns.Remove("os_product_key");    //removes os_product_key from inventory table
+                systemlicEx.Columns.Remove("os_product_key_type");    //remove os_product_key_type
+                systemlicEx.Columns.Remove("os_partial_product_key");    //removes os_product_key from inventory table
+                systemlicEx.AcceptChanges();    //Changes to data from now on will be flagged for later updating of on line database
+                //At this point systemlicEX has records from systemlic table and the invLicCombined has records for all inventory table entries. The extra columns can be ignored since the dataAdpater update sql statement will be hand crafted to use just the columns of interest. It was really unnecessary to remove the extra columns from systemlicEX - it was done for easy reading in console window.
+                OutTable2Console(systemlicEx);
+            }
 
         }
 
-        internal void UpdateSysLicTable()
+        internal int UpdateSysLicTable()
         {
+            if (systemlicEx == null)
+            {
+                Console.WriteLine("Null System Lic");
+                return 0;
+            }
             string mySqlCmd = "UPDATE `systemlic` " +
                 "SET `valid` = @valid, `product_code` = @product_code " +
                 "WHERE (`lic_db_id` = @lic_db_id)";
@@ -91,7 +104,25 @@ namespace UpdateProductKeys
             cmd.Parameters.Add("@lic_db_id", MySqlDbType.UInt32, 15, "lic_db_id");  // size is ignored for int32
             dbDataAdptr.UpdateCommand = cmd;
             var output = dbDataAdptr.Update(systemlicEx);
-            Console.WriteLine("Rows Updated = " + output);
+            Console.WriteLine("License Rows Updated = " + output);
+            return output;
+        }
+
+        internal int UpdateInventoryTable()
+        {
+            string mySqlCmd = "UPDATE `inventory2012` " +
+                "SET `active` = @active, `inv_flags` = @inv_flags, `os_product_key` = @os_product_key, `os_product_key_type` = 'manualUpdate', `os_partial_product_key` = @os_partial_product_key " +
+                "WHERE (`inv_db_id` = @inv_db_id)";
+            MySqlCommand cmd = new MySqlCommand(mySqlCmd, dbConn);
+            cmd.Parameters.Add("@active", MySqlDbType.Byte, 1, "active");   //valid is tinyint = signed byte
+            cmd.Parameters.Add("@inv_flags", MySqlDbType.Byte, 1, "inv_flags");   //valid is tinyint = signed byte
+            cmd.Parameters.Add("@os_product_key", MySqlDbType.VarChar, 80, "os_product_key");
+            cmd.Parameters.Add("@inv_db_id", MySqlDbType.UInt32, 15, "inv_db_id");  // size is ignored for int32
+            cmd.Parameters.Add("@os_partial_product_key", MySqlDbType.VarChar, 5, "os_partial_product_key");
+            dbDataAdptr.UpdateCommand = cmd;
+            var output = dbDataAdptr.Update(invLicCombined);
+            Console.WriteLine("Inventory Rows Updated = " + output);
+            return output;
         }
 
         internal void getUpLicDataset()
@@ -136,5 +167,6 @@ namespace UpdateProductKeys
                 Console.WriteLine("NEXT ROW");
             }
         }
+
     }
 }

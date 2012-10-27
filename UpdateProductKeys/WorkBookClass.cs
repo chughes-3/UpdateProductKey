@@ -17,6 +17,9 @@ namespace UpdateProductKeys
         Excel.Worksheet xlWsheet = null;
         Excel.Range xlRangeWorking;
         internal Excel.Range userMessageCell;
+        internal Excel.Range resultMessageCell;
+        internal StringBuilder sqlQryResultInventory = new StringBuilder();
+        internal StringBuilder sqlQryResultLicense = new StringBuilder();
         internal class RowData
         {
             public string mMfr;
@@ -26,9 +29,11 @@ namespace UpdateProductKeys
             public string mRsult;
         }
         internal List<RowData> rowList = new List<RowData>();
+        PidChecker pidCheck;
         List<string> colHdrsExpected = new List<string>() { "mr_manufacturer", "mr_serial_number", "OS_Product_Key", "Current Status", "Result" };
-        internal WorkBookClass()
+        internal WorkBookClass(string production)
         {
+            pidCheck = new PidChecker(production);  //instantiation for later use in checking keys
             try
             {
                 xlApp = System.Runtime.InteropServices.Marshal.GetActiveObject("Excel.Application") as Excel.Application;
@@ -69,8 +74,21 @@ namespace UpdateProductKeys
                 MessageBox.Show("The Column Headers in this spreadsheet do not conform to specification.\r\nIs the correct spreadsheet open?\r\n\r\nExiting", "Tax-Aide Update Product Keys");
                 DisposeX();
             }
-            //pull spreadsheet data across for faster performance
+            //First make sure that working range is one area and has no blank rows at the end.
+            if (xlWsheet.UsedRange.Areas.Count != 1)
+            {
+                MessageBox.Show("The used range on this spreadsheet is not contiguous, something is wrong.\r\nIs the correct spreadsheet open?\r\n\r\nExiting", "Tax-Aide Update Product Keys");
+                DisposeX();
+            }
+            //xlApp.ScreenUpdating = true;
             xlRangeWorking = xlWsheet.UsedRange;
+            while (xlApp.WorksheetFunction.CountA(xlRangeWorking.Offset[xlRangeWorking.Rows.Count - 1, 0].Resize[1, Type.Missing]) == 0)
+            {//eliminates blank rows at end of working range from the working range
+                xlRangeWorking = xlRangeWorking.Resize[xlRangeWorking.Rows.Count - 1, Type.Missing];
+            }
+            resultMessageCell = xlWsheet.Range[xlRangeWorking.Cells[(1 + xlRangeWorking.Rows.Count), 1], xlRangeWorking.Cells[(1 + xlRangeWorking.Rows.Count), 1]];
+            //Console.WriteLine(xlRangeWorking.Row.ToString() + "  rowCnt= " + xlRangeWorking.Rows.Count.ToString());
+            //pull spreadsheet data across for faster performance
             object[,] sysObj = new object[5, xlRangeWorking.Rows.Count];
             sysObj = xlRangeWorking.Value2;
             rowList = (from idx1 in Enumerable.Range(1, sysObj.GetLength(0))
@@ -80,7 +98,15 @@ namespace UpdateProductKeys
             //Debug.WriteLine(sysData.ElementAt(1).mMfr);
             Debug.WriteLine(string.Join(Environment.NewLine + "\t", from row in rowList select row.mMfr + "  " + row.mSerNo));
             //Change topic setup status column to receive text strings
-            xlWsheet.Range["D1:E1"].ColumnWidth = 40;
+            try
+            {
+                xlWsheet.Range["D1:E1"].ColumnWidth = 40;
+            }
+            catch (Exception e)
+            {
+                MessageBox.Show("Excel appears to be in a mode of not taking programmatic input. Please close all open Excel copies and restart\r\nThe error message was " + e.Message);
+                DisposeX();
+            }
             userMessageCell = xlWsheet.Range["D1"];
             userMessageCell.Value2 = "Querying the database for these systems";
             userMessageCell.Font.Italic = true;
@@ -89,9 +115,16 @@ namespace UpdateProductKeys
 
         internal void ProcessRows(MySql dbAccess)
         {
-            userMessageCell.Value2 = "Updating local copy of license database entries";
+            userMessageCell.Value2 = "Updating local copy of license and inventory database entries";
             foreach (var row in rowList)
             {
+                if (dbAccess.systemlicEx == null)
+                {
+                    row.mRsult = "No Entry in License Database";
+                    UpdateWSheetRow(rowList.IndexOf(row));
+                    InvDbAnalysis(dbAccess, row);
+                    continue;
+                }
                 var qry = from DataRow record in dbAccess.systemlicEx.Rows
                           where ((record["mr_serial_number"] != DBNull.Value) ? (string)record["mr_serial_number"] : "") == row.mSerNo && ((record["mr_manufacturer"] != DBNull.Value) ? (string)record["mr_manufacturer"] : "") == row.mMfr
                           select new { rec = record, indx = dbAccess.systemlicEx.Rows.IndexOf(record) };
@@ -100,7 +133,7 @@ namespace UpdateProductKeys
                     case 0:
                         row.mRsult = "No Entry in License Database";
                         UpdateWSheetRow(rowList.IndexOf(row));
-                        InvDbAnalysis();
+                        InvDbAnalysis(dbAccess, row);
                         continue;
                     case 1:
                         break;
@@ -118,16 +151,16 @@ namespace UpdateProductKeys
                 Func<bool> keyfordownload0 = () => ((sbyte)rowlicTable["valid"] & 2) == 2;
                 Func<bool> nlkfordownload0 = () => ((string)rowlicTable["product_code"]) == "NLK";
                 Action statusNotValid0000 = () => row.mRsult = "Flagged \"Not Valid\" in License Database";
-                Action statusKeyUpload000 = () => ProcessNewKey(row, "Upload Product Key - VLK(Techsoup??)", rowlicTable);
-                Action statusKeyUploadOEM = () => ProcessNewKey(row, "Upload OEM COA Product Key", rowlicTable);
-                Action statKeyForDownload = () => { string l5 = GetExistKeyLast5(rowlicTable); ProcessNewKey(row, "Product Key Ending " + l5 + " available for download", rowlicTable); };
-                Action statNLKForDownload = () => ProcessNewKey(row, "NLK available for download", rowlicTable);
+                Action statusKeyUpload000 = () => ProcessNewKeyLic(row, "Upload Product Key - VLK(Techsoup??)", rowlicTable);
+                Action statusKeyUploadOEM = () => ProcessNewKeyLic(row, "Upload OEM COA Product Key", rowlicTable);
+                Action statKeyForDownload = () => { string l5 = GetExistKeyLast5(rowlicTable); ProcessNewKeyLic(row, "Product Key Ending " + l5 + " available for download", rowlicTable); };
+                Action statNLKForDownload = () => ProcessNewKeyLic(row, "NLK available for download", rowlicTable);
                 LogicTable.Start()
-                    .Condition(notValid0000000, "T----")
-                    .Condition(forceKeyUpload0, "FTTFF")
-                    .Condition(forcKeyUplodOEM, "FFTFF")
-                    .Condition(keyfordownload0, "FFFTF")
-                    .Condition(nlkfordownload0, "FFF-T")
+                    .Condition(notValid0000000, "TFFFF")
+                    .Condition(forceKeyUpload0, "-TTFF")
+                    .Condition(forcKeyUplodOEM, "-FTFF")
+                    .Condition(keyfordownload0, "-FFTF")
+                    .Condition(nlkfordownload0, "-FF-T")
                     .Action(statusNotValid0000, "X    ")
                     .Action(statusKeyUploadOEM, "  X  ")
                     .Action(statusKeyUpload000, " X   ")
@@ -136,7 +169,59 @@ namespace UpdateProductKeys
                 dbAccess.systemlicEx.Rows[licTableRow]["valid"] = rowlicTable["valid"];
                 dbAccess.systemlicEx.Rows[licTableRow]["product_code"] = rowlicTable["product_code"];
                 UpdateWSheetRow(rowList.IndexOf(row));
+                if (sqlQryResultLicense.Length > 0)
+                    sqlQryResultLicense.Append(" OR ");
+                sqlQryResultLicense.Append("(`mr_manufacturer` = " + "'" + row.mMfr + "' AND " + "`mr_serial_number` = " + "'" + row.mSerNo + "')");
             }
+        }
+
+        private void InvDbAnalysis(MySql dbAccess, RowData row)
+        {
+            var qry = from DataRow record in dbAccess.invLicCombined.Rows
+                      where ((record["mr_serial_number"] != DBNull.Value) ? (string)record["mr_serial_number"] : "") == row.mSerNo && ((record["mr_manufacturer"] != DBNull.Value) ? (string)record["mr_manufacturer"] : "") == row.mMfr
+                      select new { rec = record, indx = dbAccess.invLicCombined.Rows.IndexOf(record) };
+            switch (qry.Count())
+            {
+                case 0:
+                    row.mRsult = "No Entry in Inventory or License Database";
+                    UpdateWSheetRow(rowList.IndexOf(row));
+                    return;
+                case 1:
+                    break;
+                default:
+                    row.mRsult = "Multiple Entries in Inventory Database - major DB error";
+                    UpdateWSheetRow(rowList.IndexOf(row));
+                    return;
+            }
+            //at this point have only 1 record which is correct and desirable
+            DataRow rowInvTable = qry.ElementAtOrDefault(0).rec;    //row in license table to be processed
+            int invTableRow = qry.ElementAtOrDefault(0).indx;   //index of that row - needed for later updating of the database after row processing
+            Func<bool> testIfActive000 = () => ((sbyte)rowInvTable["active"] & 1) == 0;
+            Func<bool> qualified4Nlk00 = () => ((sbyte)rowInvTable["active"] & 2) == 2;
+            Func<bool> localW7LicAvail = () => ((sbyte)rowInvTable["inv_flags"] & 4) == 4;
+            Func<bool> locW7withKtype0 = () => (string.IsNullOrWhiteSpace((string)rowInvTable["os_product_key_type"])) == false;
+            //Func<bool> locW7withlast5c = () => (string.IsNullOrWhiteSpace((string)rowInvTable["os_partial_product_key"])) == false;
+            Action errMessageNotActiv = () => { row.mRsult = "Flagged as Not Active System in Inventory database"; };
+            Action errMessNotW7Eligab = () => { row.mStatus = "System in Inventory DB, but is not eligible for NLK Win 7 installation"; ProcessNewKeyInv(row, "System Status updated in Inventory DB to allow key download and install", rowInvTable); };
+            Action statusPartKeyExist = () => { row.mStatus = "Windows 7, Key Type is " + rowInvTable["os_product_key_type"] + " with last 5 of " + rowInvTable["os_partial_product_key"]; ProcessNewKeyInv(row, "Inventory DB Product Key updated and ready for download", rowInvTable); };
+            Action statusWindowsXP000 = () => { row.mStatus = "Windows XP or No data for Windows 7"; ProcessNewKeyInv(row, "Inventory DB Product Key added and is ready for download", rowInvTable); };
+            //Action statusNlkEligible0 = () => { row.mStatus = "NLK Eligible"; ProcessNewKeyInv(row, "Product Key added and is ready for download", rowInvTable); };
+            LogicTable.Start()
+                .Condition(testIfActive000, "TFFF")
+                .Condition(qualified4Nlk00, "-F-T")
+                .Condition(localW7LicAvail, "-FT-")
+                .Condition(locW7withKtype0, "---F")
+                .Action(errMessageNotActiv, "X   ")
+                .Action(errMessNotW7Eligab, " X  ")   // W7 Home premium will end on this action
+                .Action(statusPartKeyExist, "  X ")
+                .Action(statusWindowsXP000, "   X");
+            dbAccess.invLicCombined.Rows[invTableRow]["active"] = rowInvTable["active"];
+            dbAccess.invLicCombined.Rows[invTableRow]["inv_flags"] = rowInvTable["inv_flags"];
+            dbAccess.invLicCombined.Rows[invTableRow]["os_product_key"] = rowInvTable["os_product_key"];
+            UpdateWSheetRow(rowList.IndexOf(row));
+            if (sqlQryResultInventory.Length != 0) 
+                sqlQryResultInventory.Append(" OR ");
+            sqlQryResultInventory.Append("(`mr_manufacturer` = " + "'" + row.mMfr + "' AND " + "`mr_serial_number` = " + "'" + row.mSerNo + "')");
         }
 
         private string GetExistKeyLast5(DataRow rowDataBase)
@@ -145,7 +230,7 @@ namespace UpdateProductKeys
             return decKey.Substring(24);
         }
 
-        private void ProcessNewKey(RowData row, string mstatusMess, DataRow rowDataBase)
+        private void ProcessNewKeyLic(RowData row, string mstatusMess, DataRow rowLicDataBase)
         {
             //check key with pid chaecker here to be added after reg exp check
             row.mStatus = mstatusMess;
@@ -156,14 +241,49 @@ namespace UpdateProductKeys
                 row.mRsult = "Specified Product Key has incorrect form or alphanumeric characters";
                 return;
             }
+            string tempstor = userMessageCell.Value2;
+            userMessageCell.Value2 = "Checking Product Key this will take a while";
+            string resKey = pidCheck.CheckProductKey(row.mOsPK);
+            if (resKey != "Valid")
+            {
+                row.mRsult = resKey;
+                return;
+            }
+            userMessageCell.Value2 = tempstor;
             string encKey = EncodeDecodeKey(row.mOsPK, "-e");  //Encrypt the key
-            rowDataBase["product_code"] = encKey;
-            rowDataBase["valid"] = ((sbyte)rowDataBase["valid"] & 249) + 2; //resets the 4 bit and sets the 2 bit
-            row.mRsult = "Product Key Updated ";
+            rowLicDataBase["product_code"] = encKey;
+            rowLicDataBase["valid"] = ((sbyte)rowLicDataBase["valid"] & 249) + 2; //resets the 4 bit and sets the 2 bit
+            row.mRsult = "Product Key Updated in the License Database";
             //Console.ReadKey();
         }
 
-        private static string EncodeDecodeKey(string str, string param)
+        void ProcessNewKeyInv(RowData row, string mResultMess, DataRow rowInvDataBase)
+        {
+            System.Text.RegularExpressions.Regex keyPattern = new System.Text.RegularExpressions.Regex("^([BCDFGHJKMPQRTVWXY2346789]{5}-){4}[BCDFGHJKMPQRTVWXY2346789]{5}$");
+            System.Text.RegularExpressions.Regex keyPattern1 = new System.Text.RegularExpressions.Regex("^[BCDFGHJKMPQRTVWXY2346789]{25}$");
+            if (row.mOsPK == null || !(keyPattern.IsMatch(row.mOsPK) || keyPattern1.IsMatch(row.mOsPK)))
+            {
+                row.mRsult = "Specified Product Key has incorrect form or alphanumeric characters";
+                return;
+            }
+            string tempstor = userMessageCell.Value2;
+            userMessageCell.Value2 = "Checking Product Key this will take a while";
+            string resKey = pidCheck.CheckProductKey(row.mOsPK);
+            if (resKey != "Valid")
+            {
+                row.mRsult = resKey;
+                return;
+            }
+            userMessageCell.Value2 = tempstor;
+            string encKey = EncodeDecodeKey(row.mOsPK, "-e");  //Encrypt the key
+            rowInvDataBase["os_product_key"] = encKey;
+            rowInvDataBase["active"] = ((sbyte)rowInvDataBase["active"] & 253); //resets NLK bit in case it is set
+            rowInvDataBase["inv_flags"] = ((sbyte)rowInvDataBase["inv_flags"] & 251) + 4;   //sets the 4 bit indicating key is available
+            rowInvDataBase["os_partial_product_key"] = row.mOsPK.Substring(24);
+            row.mRsult = mResultMess;
+        }
+
+        private string EncodeDecodeKey(string str, string param)
         {//Calls KeyCrypt with either -e or -d as a parameter and gets a string back and forth
             string encDecKey;
             using (MemoryMappedFile mmf = MemoryMappedFile.CreateNew("EncDecString", 80))
@@ -197,8 +317,16 @@ namespace UpdateProductKeys
             return encDecKey;
         }
 
-        private void InvDbAnalysis()
+        internal void ResultUserMess(string numLicRec, string numInvRec)
         {
+            userMessageCell.Value2 = "Updating License database from local copy";
+            resultMessageCell.Value2 = "Number of License table records updated = " + numLicRec;
+            userMessageCell.Value2 = "Updating Inventory database from local copy";
+            resultMessageCell.Offset[1,Type.Missing].Value2 = "Number of Inventory table records updated = " + numInvRec;
+            resultMessageCell.Offset[2, Type.Missing].Value2 = "Below are license and inventory table search strings to check updated records, copy/paste the ENTIRE cell into the SQL Query \"Where\" clause box on the query page";
+            resultMessageCell.Offset[3, Type.Missing].Value2 = sqlQryResultLicense.ToString();
+            resultMessageCell.Offset[4, Type.Missing].Value2 = sqlQryResultInventory.ToString();
+            RemoveUserMess();
         }
 
         internal void UpdateWSheet()
